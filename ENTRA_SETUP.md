@@ -6,9 +6,24 @@ by tenants which enable the Microsoft-managed Conditional Access policy
 *"Block device code flow"* (on by default for tenants created after Microsoft's
 2025 security baseline rollout).
 
-The interactive flow requires your **own Entra app registration**, because the upstream
-default (Microsoft Graph CLI app, `14d82eec-204b-4c2f-b7e8-296a70dab67e`) does not
-have `http://localhost` registered as a public-client redirect URI in your tenant.
+The interactive flow requires an Entra app registration **in your tenant**, because the
+upstream default (Microsoft Graph CLI app, `14d82eec-204b-4c2f-b7e8-296a70dab67e`) does
+not have `http://localhost` registered as a public-client redirect URI in your tenant.
+
+## Which path applies to you?
+
+The app registration is **per tenant, not per user** — one registration serves the whole
+organisation. Tokens are user-delegated and stored per user (`~/.teams-mcp-token-cache.json`),
+so every signed-in user only sees their own Teams data.
+
+- **Path A — first person in the tenant / admin:** no existing registration yet. Follow
+  sections 1 → 5 below to create it, grant admin consent, and authenticate.
+- **Path B — your org already has a teams-mcp app registration:** ask whoever set it up
+  (or your Entra admin) for the **client ID** and **tenant ID**. Skip sections 1 – 3 and
+  jump straight to [section 4 (Authenticate)](#4-authenticate).
+
+The client ID is **not a secret** — it's safe to share internally (Teams/Slack/wiki),
+but don't publish it to public GitHub.
 
 ## 1. Register the app
 
@@ -70,7 +85,8 @@ the upstream default `/common` will reject sign-in with `AADSTS50194`.
 
 ## 4. Authenticate
 
-From the cloned/built fork:
+You need the **client ID** and **tenant ID** from section 3 (or from your admin if you
+are on Path B). From the cloned/built fork:
 
 ```bash
 TEAMS_MCP_CLIENT_ID=<your-client-id> \
