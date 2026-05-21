@@ -3,8 +3,7 @@
 This fork adds an `authenticate --interactive` flow that uses **OAuth auth-code + PKCE
 with a loopback redirect**, sidestepping the upstream device-code flow that gets blocked
 by tenants which enable the Microsoft-managed Conditional Access policy
-*"Block device code flow"* (on by default for tenants created after Microsoft's
-2025 security baseline rollout).
+*"Block device code flow"* (often enforced by tenant Conditional Access policy).
 
 The interactive flow requires an Entra app registration **in your tenant**, because the
 upstream default (Microsoft Graph CLI app, `14d82eec-204b-4c2f-b7e8-296a70dab67e`) does

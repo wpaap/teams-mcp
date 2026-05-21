@@ -41,6 +41,7 @@ async function readAuthInfo(): Promise<Record<string, unknown> | undefined> {
   }
 }
 
+/** Persist auth result metadata (account, scopes, expiry) with owner-only perms. */
 async function saveAuthInfo(result: AuthenticationResult, clientId: string): Promise<void> {
   const authInfo = {
     clientId,
@@ -63,6 +64,7 @@ async function saveAuthInfo(result: AuthenticationResult, clientId: string): Pro
   }
 }
 
+/** Print uniform success banner after either auth flow completes. */
 function reportAuthSuccess(
   result: AuthenticationResult,
   modeLabel: string,
@@ -76,6 +78,7 @@ function reportAuthSuccess(
   console.log("🔄 Refresh token cached for automatic renewal");
 }
 
+/** Map common AADSTS error codes to actionable messages, then exit non-zero. */
 function reportAuthError(error: unknown): never {
   const errorMessage = error instanceof Error ? error.message : String(error);
   if (errorMessage.includes("AADSTS50020")) {
@@ -93,7 +96,7 @@ function reportAuthError(error: unknown): never {
   process.exit(1);
 }
 
-// Authentication functions
+/** Device-code flow — prints user code + URL, polls until completion. */
 async function authenticate(readOnly: boolean) {
   const scopes = readOnly ? READ_ONLY_SCOPES : FULL_SCOPES;
   const modeLabel = readOnly ? "read-only" : "full access";
@@ -139,6 +142,7 @@ async function authenticate(readOnly: boolean) {
   }
 }
 
+/** Interactive auth-code + PKCE flow with loopback redirect; opens browser. */
 async function authenticateInteractive(readOnly: boolean) {
   const scopes = readOnly ? READ_ONLY_SCOPES : FULL_SCOPES;
   const modeLabel = readOnly ? "read-only" : "full access";
@@ -187,6 +191,7 @@ async function authenticateInteractive(readOnly: boolean) {
   }
 }
 
+/** Report persisted auth state (account, scope mode, token expiry) to stdout. */
 async function checkAuth() {
   try {
     const data = await fs.readFile(AUTH_INFO_PATH, "utf8");
@@ -237,6 +242,7 @@ async function checkAuth() {
   return false;
 }
 
+/** Remove persisted auth info + MSAL token cache files. */
 async function logout() {
   const CACHE_PATH = join(homedir(), ".teams-mcp-token-cache.json");
 
@@ -256,7 +262,7 @@ async function logout() {
   console.log("🔄 Run 'teams-mcp authenticate' (or '--interactive') to re-authenticate");
 }
 
-// MCP Server setup
+/** Boot MCP server over stdio, registering tool groups; warns on scope mismatch. */
 async function startMcpServer(readOnly: boolean) {
   // Create MCP server
   const server = new McpServer({
@@ -308,7 +314,7 @@ async function startMcpServer(readOnly: boolean) {
   console.error(`Microsoft Graph MCP Server started${readOnly ? " (read-only mode)" : ""}`);
 }
 
-// Main function to handle both CLI and MCP server modes
+/** CLI entry point — dispatches subcommands or starts the MCP server. */
 async function main() {
   const args = process.argv.slice(2);
   const command = args.find((arg) => arg !== "--read-only" && arg !== "--interactive");
