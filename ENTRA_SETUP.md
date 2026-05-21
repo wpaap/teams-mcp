@@ -16,7 +16,7 @@ Microsoft Entra admin center → **Identity → Applications → App registratio
 
 | Field                 | Value                                                          |
 |-----------------------|----------------------------------------------------------------|
-| Name                  | `teams-mcp` (or org-specific, e.g. `summit-teams-mcp`)         |
+| Name                  | `teams-mcp` (or org-specific, e.g. `yourcompany-teams-mcp`)    |
 | Supported accounts    | **Single tenant only** (`Accounts in this organizational directory only`) |
 | Redirect URI platform | **Public client/native (mobile & desktop)**                    |
 | Redirect URI value    | `http://localhost` *(no port — Entra allows any loopback port at runtime per RFC 8252)* |
