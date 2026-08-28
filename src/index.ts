@@ -11,7 +11,7 @@ import {
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { getAuthority, getClientId } from "./config.js";
-import { cachePlugin } from "./msal-cache.js";
+import { CACHE_PATH, cachePlugin } from "./msal-cache.js";
 import { FULL_SCOPES, GraphService, READ_ONLY_SCOPES } from "./services/graph.js";
 import { registerAuthTools } from "./tools/auth.js";
 import { registerChatTools } from "./tools/chats.js";
@@ -244,8 +244,6 @@ async function checkAuth() {
 
 /** Remove persisted auth info + MSAL token cache files. */
 async function logout() {
-  const CACHE_PATH = join(homedir(), ".teams-mcp-token-cache.json");
-
   try {
     await fs.unlink(AUTH_INFO_PATH);
   } catch (_error) {

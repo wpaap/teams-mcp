@@ -1,28 +1,93 @@
 import { promises as fs } from "node:fs";
+import { basename, join } from "node:path";
 import type { TokenCacheContext } from "@azure/msal-node";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the filesystem
 vi.mock("node:fs", () => ({
   promises: {
-    readFile: vi.fn(),
-    writeFile: vi.fn(),
     chmod: vi.fn().mockResolvedValue(undefined),
+    mkdir: vi.fn(),
+    readFile: vi.fn(),
+    rename: vi.fn(),
+    rm: vi.fn(),
+    stat: vi.fn(),
+    writeFile: vi.fn(),
   },
 }));
 
 // Import after mocks are set up
 import { CACHE_PATH, cachePlugin } from "../msal-cache.js";
 
+const CACHE_LOCK_PATH = `${CACHE_PATH}.lock`;
+const CACHE_LOCK_OWNER_PATH = join(CACHE_LOCK_PATH, "owner");
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const cacheFileNamePattern = escapeRegExp(basename(CACHE_PATH));
+const corruptCachePathPattern = new RegExp(`${cacheFileNamePattern}\\.corrupt\\.\\d+\\.\\d+$`);
+const tempCachePathPattern = new RegExp(`\\.${cacheFileNamePattern}\\.\\d+\\.\\d+\\.tmp$`);
+
+let currentLockOwner = "";
+
+/** Serve `cacheData` for the cache file, and the live owner for the lock file. */
+function mockCacheRead(cacheData: string): void {
+  vi.mocked(fs.readFile).mockImplementation(async (path) => {
+    if (path === CACHE_LOCK_OWNER_PATH) {
+      return currentLockOwner;
+    }
+    if (path === CACHE_PATH) {
+      return cacheData;
+    }
+    throw new Error(`Unexpected read path: ${String(path)}`);
+  });
+}
+
+function mockCacheReadError(error: Error): void {
+  vi.mocked(fs.readFile).mockImplementation(async (path) => {
+    if (path === CACHE_LOCK_OWNER_PATH) {
+      return currentLockOwner;
+    }
+    if (path === CACHE_PATH) {
+      throw error;
+    }
+    throw new Error(`Unexpected read path: ${String(path)}`);
+  });
+}
+
+function silenceConsoleError() {
+  return vi.spyOn(console, "error").mockImplementation(() => {
+    // Intentionally empty to suppress console output during tests
+  });
+}
+
 describe("MSAL Cache Plugin", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    currentLockOwner = "";
+    vi.mocked(fs.chmod).mockResolvedValue(undefined);
+    vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+    vi.mocked(fs.readFile).mockImplementation(async (path) => {
+      if (path === CACHE_LOCK_OWNER_PATH) {
+        return currentLockOwner;
+      }
+      throw new Error(`Unexpected read path: ${String(path)}`);
+    });
+    vi.mocked(fs.rename).mockResolvedValue(undefined);
+    vi.mocked(fs.rm).mockResolvedValue(undefined);
+    vi.mocked(fs.writeFile).mockImplementation(async (path, data) => {
+      if (path === CACHE_LOCK_OWNER_PATH) {
+        currentLockOwner = String(data);
+      }
+    });
   });
 
   describe("beforeCacheAccess", () => {
     it("should deserialize cache data from file when it exists", async () => {
       const mockCacheData = '{"test": "data"}';
-      vi.mocked(fs.readFile).mockResolvedValue(mockCacheData);
+      mockCacheRead(mockCacheData);
 
       const deserializeMock = vi.fn();
       const cacheContext = {
@@ -35,12 +100,13 @@ describe("MSAL Cache Plugin", () => {
 
       expect(fs.readFile).toHaveBeenCalledWith(CACHE_PATH, "utf8");
       expect(deserializeMock).toHaveBeenCalledWith(mockCacheData);
+      expect(fs.rm).toHaveBeenCalledWith(CACHE_LOCK_PATH, { recursive: true, force: true });
     });
 
     it("should handle missing cache file (ENOENT) silently", async () => {
       const error = new Error("File not found") as NodeJS.ErrnoException;
       error.code = "ENOENT";
-      vi.mocked(fs.readFile).mockRejectedValue(error);
+      mockCacheReadError(error);
 
       const deserializeMock = vi.fn();
       const cacheContext = {
@@ -49,9 +115,7 @@ describe("MSAL Cache Plugin", () => {
         },
       } as unknown as TokenCacheContext;
 
-      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {
-        // Intentionally empty to suppress console output during tests
-      });
+      const consoleErrorSpy = silenceConsoleError();
 
       await cachePlugin.beforeCacheAccess(cacheContext);
 
@@ -65,7 +129,7 @@ describe("MSAL Cache Plugin", () => {
     it("should log error for other file read failures", async () => {
       const error = new Error("Permission denied") as NodeJS.ErrnoException;
       error.code = "EACCES";
-      vi.mocked(fs.readFile).mockRejectedValue(error);
+      mockCacheReadError(error);
 
       const deserializeMock = vi.fn();
       const cacheContext = {
@@ -74,9 +138,7 @@ describe("MSAL Cache Plugin", () => {
         },
       } as unknown as TokenCacheContext;
 
-      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {
-        // Intentionally empty to suppress console output during tests
-      });
+      const consoleErrorSpy = silenceConsoleError();
 
       await cachePlugin.beforeCacheAccess(cacheContext);
 
@@ -86,10 +148,89 @@ describe("MSAL Cache Plugin", () => {
 
       consoleErrorSpy.mockRestore();
     });
+
+    it("should quarantine invalid cache data and continue with an empty cache", async () => {
+      mockCacheRead("{invalid-json}");
+
+      const deserializeMock = vi.fn().mockImplementation(() => {
+        throw new SyntaxError("Unexpected non-whitespace character after JSON");
+      });
+      const cacheContext = {
+        tokenCache: {
+          deserialize: deserializeMock,
+        },
+      } as unknown as TokenCacheContext;
+
+      const consoleErrorSpy = silenceConsoleError();
+
+      await cachePlugin.beforeCacheAccess(cacheContext);
+
+      expect(deserializeMock).toHaveBeenCalledWith("{invalid-json}");
+      expect(fs.rename).toHaveBeenCalledWith(
+        CACHE_PATH,
+        expect.stringMatching(corruptCachePathPattern)
+      );
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "Warning: Token cache is invalid; moved aside:",
+        expect.stringMatching(corruptCachePathPattern)
+      );
+
+      consoleErrorSpy.mockRestore();
+    });
+
+    it("should not release a lock owned by another process", async () => {
+      vi.mocked(fs.readFile).mockImplementation(async (path) => {
+        if (path === CACHE_LOCK_OWNER_PATH) {
+          return currentLockOwner;
+        }
+        if (path === CACHE_PATH) {
+          // Another process takes over the lock while we hold the cache open.
+          currentLockOwner = "999999.1.other-owner";
+          return '{"test": "data"}';
+        }
+        throw new Error(`Unexpected read path: ${String(path)}`);
+      });
+
+      const cacheContext = {
+        tokenCache: {
+          deserialize: vi.fn(),
+        },
+      } as unknown as TokenCacheContext;
+
+      await cachePlugin.beforeCacheAccess(cacheContext);
+
+      expect(fs.rm).not.toHaveBeenCalledWith(CACHE_LOCK_PATH, { recursive: true, force: true });
+    });
+
+    it("should still read the cache when the lock cannot be taken", async () => {
+      const lockError = new Error("Permission denied") as NodeJS.ErrnoException;
+      lockError.code = "EACCES";
+      vi.mocked(fs.mkdir).mockRejectedValue(lockError);
+      mockCacheRead('{"test": "data"}');
+
+      const deserializeMock = vi.fn();
+      const cacheContext = {
+        tokenCache: {
+          deserialize: deserializeMock,
+        },
+      } as unknown as TokenCacheContext;
+
+      const consoleErrorSpy = silenceConsoleError();
+
+      await cachePlugin.beforeCacheAccess(cacheContext);
+
+      expect(deserializeMock).toHaveBeenCalledWith('{"test": "data"}');
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "Warning: Proceeding without token cache lock:",
+        lockError
+      );
+
+      consoleErrorSpy.mockRestore();
+    });
   });
 
   describe("afterCacheAccess", () => {
-    it("should serialize and write cache data when cache has changed", async () => {
+    it("should write cache data atomically when cache has changed", async () => {
       const mockSerializedData = '{"test": "serialized"}';
       const serializeMock = vi.fn().mockReturnValue(mockSerializedData);
 
@@ -103,10 +244,20 @@ describe("MSAL Cache Plugin", () => {
       await cachePlugin.afterCacheAccess(cacheContext);
 
       expect(serializeMock).toHaveBeenCalled();
-      expect(fs.writeFile).toHaveBeenCalledWith(CACHE_PATH, mockSerializedData, {
-        encoding: "utf8",
-        mode: 0o600,
-      });
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        expect.stringMatching(tempCachePathPattern),
+        mockSerializedData,
+        { encoding: "utf8", mode: 0o600 }
+      );
+      expect(fs.rename).toHaveBeenCalledWith(
+        expect.stringMatching(tempCachePathPattern),
+        CACHE_PATH
+      );
+      expect(fs.writeFile).not.toHaveBeenCalledWith(
+        CACHE_PATH,
+        mockSerializedData,
+        expect.anything()
+      );
     });
 
     it("should not write cache data when cache has not changed", async () => {
@@ -122,16 +273,20 @@ describe("MSAL Cache Plugin", () => {
       await cachePlugin.afterCacheAccess(cacheContext);
 
       expect(serializeMock).not.toHaveBeenCalled();
-      expect(fs.writeFile).not.toHaveBeenCalled();
+      expect(fs.rename).not.toHaveBeenCalled();
     });
 
     it("should log error when cache write fails", async () => {
       const error = new Error("Disk full");
-      vi.mocked(fs.writeFile).mockRejectedValue(error);
+      vi.mocked(fs.writeFile).mockImplementation(async (path, data) => {
+        if (path === CACHE_LOCK_OWNER_PATH) {
+          currentLockOwner = String(data);
+          return;
+        }
+        throw error;
+      });
 
-      const mockSerializedData = '{"test": "serialized"}';
-      const serializeMock = vi.fn().mockReturnValue(mockSerializedData);
-
+      const serializeMock = vi.fn().mockReturnValue('{"test": "serialized"}');
       const cacheContext = {
         cacheHasChanged: true,
         tokenCache: {
@@ -139,17 +294,12 @@ describe("MSAL Cache Plugin", () => {
         },
       } as unknown as TokenCacheContext;
 
-      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {
-        // Intentionally empty to suppress console output during tests
-      });
+      const consoleErrorSpy = silenceConsoleError();
 
       await cachePlugin.afterCacheAccess(cacheContext);
 
       expect(serializeMock).toHaveBeenCalled();
-      expect(fs.writeFile).toHaveBeenCalledWith(CACHE_PATH, mockSerializedData, {
-        encoding: "utf8",
-        mode: 0o600,
-      });
+      expect(fs.rename).not.toHaveBeenCalledWith(expect.anything(), CACHE_PATH);
       expect(consoleErrorSpy).toHaveBeenCalledWith("Warning: Could not write token cache:", error);
 
       consoleErrorSpy.mockRestore();
