@@ -15,10 +15,13 @@ import type {
   TeamSummary,
 } from "../types/graph.js";
 import {
+  type AnnouncementBanner,
+  buildAnnouncementBanner,
   extractAttachmentSummaries,
   type ImageAttachment,
   imageUrlToBase64,
   isValidImageType,
+  readAnnouncementImage,
   uploadImageAsHostedContent,
 } from "../utils/attachments.js";
 import { detectContentType } from "../utils/content-type.js";
@@ -293,11 +296,17 @@ export function registerTeamsTools(
       {
         title: "Send Channel Message",
         description:
-          "Send a message to a specific channel in a Microsoft Team. Supports text and markdown formatting, mentions, and importance levels.",
+          "Send a message to a specific channel in a Microsoft Team. Supports text and markdown formatting, mentions, importance levels and a subject line. Set announcementImagePath to post it as a Teams announcement: a banner image (PNG/JPEG) with an optional title drawn on it, with the subject as subheading.",
         inputSchema: {
           teamId: z.string().describe("Team ID"),
           channelId: z.string().describe("Channel ID"),
           message: z.string().describe("Message content"),
+          subject: z
+            .string()
+            .optional()
+            .describe(
+              "Message subject, shown as the post's headline (the subheading under the banner of an announcement)"
+            ),
           importance: z
             .enum(["normal", "high", "urgent"])
             .optional()
@@ -324,6 +333,18 @@ export function registerTeamsTools(
             .optional()
             .describe("MIME type of the image (e.g., 'image/jpeg', 'image/png')"),
           imageFileName: z.string().optional().describe("Name for the attached image file"),
+          announcementImagePath: z
+            .string()
+            .optional()
+            .describe(
+              "Absolute local path to a PNG or JPEG banner image. When set, the message is posted as a Teams announcement with this image as banner (the body is sent as HTML). Cannot be combined with imageUrl/imageData."
+            ),
+          announcementTitle: z
+            .string()
+            .optional()
+            .describe(
+              "Title text drawn on the announcement banner (default: none). Requires announcementImagePath."
+            ),
         },
         annotations: {
           readOnlyHint: false,
@@ -336,6 +357,7 @@ export function registerTeamsTools(
         teamId,
         channelId,
         message,
+        subject,
         importance = "normal",
         format = "text",
         mentions,
@@ -343,8 +365,55 @@ export function registerTeamsTools(
         imageData,
         imageContentType,
         imageFileName,
+        announcementImagePath,
+        announcementTitle,
       }) => {
         try {
+          // Validate and read the announcement banner before any Graph call
+          let announcement: AnnouncementBanner | undefined;
+          if (announcementTitle !== undefined && announcementImagePath === undefined) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: "❌ announcementTitle requires announcementImagePath",
+                },
+              ],
+              isError: true,
+            };
+          }
+          if (announcementImagePath !== undefined) {
+            if (imageUrl || imageData) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: "❌ announcementImagePath cannot be combined with imageUrl/imageData",
+                  },
+                ],
+                isError: true,
+              };
+            }
+            try {
+              const image = await readAnnouncementImage(announcementImagePath);
+              announcement = buildAnnouncementBanner(
+                image.data,
+                image.contentType,
+                announcementTitle ?? ""
+              );
+            } catch (error: unknown) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `❌ ${error instanceof Error ? error.message : "Cannot read announcement image"}`,
+                  },
+                ],
+                isError: true,
+              };
+            }
+          }
+
           const client = await graphService.getClient();
 
           // Process message content based on format
@@ -463,6 +532,15 @@ export function registerTeamsTools(
             }
           }
 
+          // An announcement needs an HTML body that opens with the banner's attachment tag
+          if (announcement) {
+            if (contentType === "text") {
+              content = escapeHtml(content).replace(/\r?\n/g, "<br>");
+              contentType = "html";
+            }
+            content = `${announcement.bodyTag}${content}`;
+          }
+
           // Build message payload
           const messagePayload: any = {
             body: {
@@ -472,12 +550,21 @@ export function registerTeamsTools(
             importance,
           };
 
+          if (subject) {
+            messagePayload.subject = subject;
+          }
+
           if (finalMentions.length > 0) {
             messagePayload.mentions = finalMentions;
           }
 
           if (attachments.length > 0) {
             messagePayload.attachments = attachments;
+          }
+
+          if (announcement) {
+            messagePayload.attachments = [announcement.attachment];
+            messagePayload.hostedContents = announcement.hostedContents;
           }
 
           const result = (await client
@@ -489,7 +576,9 @@ export function registerTeamsTools(
             finalMentions.length > 0
               ? `\n📱 Mentions: ${finalMentions.map((m) => m.mentionText).join(", ")}`
               : ""
-          }${attachments.length > 0 ? `\n🖼️ Image attached: ${attachments[0].name}` : ""}`;
+          }${attachments.length > 0 ? `\n🖼️ Image attached: ${attachments[0].name}` : ""}${
+            announcement ? `\n📣 Posted as announcement with banner ${announcementImagePath}` : ""
+          }`;
 
           return {
             content: [

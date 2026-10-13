@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { promises as fsPromises, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createMockMcpServer,
   mockChannel,
@@ -349,6 +352,9 @@ describe("Teams Tools", () => {
       expect(tool.schema.channelId).toBeDefined();
       expect(tool.schema.message).toBeDefined();
       expect(tool.schema.importance).toBeDefined();
+      expect(tool.schema.subject).toBeDefined();
+      expect(tool.schema.announcementImagePath).toBeDefined();
+      expect(tool.schema.announcementTitle).toBeDefined();
     });
 
     it("should send message with markdown format", async () => {
@@ -582,6 +588,248 @@ describe("Teams Tools", () => {
 
       expect(result.content[0].text).toContain("❌ Failed to upload image attachment");
       expect(result.isError).toBe(true);
+    });
+
+    it("should send a subject without making the message an announcement", async () => {
+      mockClient.api().post.mockResolvedValue({ ...mockChatMessage, id: "subject-message-id" });
+      registerTeamsTools(mockServer, mockGraphService, false);
+
+      const tool = mockServer.getTool("send_channel_message");
+      const result = await tool.handler({
+        teamId: "test-team-id",
+        channelId: "test-channel-id",
+        message: "Release notes",
+        subject: "Release 2026-10-13",
+      });
+
+      expect(result.content[0].text).toContain("✅ Message sent successfully");
+      expect(result.content[0].text).not.toContain("announcement");
+      expect(mockClient.api().post).toHaveBeenCalledWith({
+        subject: "Release 2026-10-13",
+        body: {
+          content: "Release notes",
+          contentType: "text",
+        },
+        importance: "normal",
+      });
+    });
+
+    describe("announcements", () => {
+      const pngBytes = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+        "base64"
+      );
+      let tempDir: string;
+      let pngPath: string;
+      let realReadFile: typeof fsPromises.readFile;
+
+      beforeAll(async () => {
+        // The global test setup stubs fs.promises.readFile; these tests read a real temp file
+        const actualFs = await vi.importActual<typeof import("node:fs")>("node:fs");
+        realReadFile = actualFs.promises.readFile;
+        tempDir = mkdtempSync(join(tmpdir(), "teams-mcp-announcement-"));
+        pngPath = join(tempDir, "banner.png");
+        writeFileSync(pngPath, pngBytes);
+        writeFileSync(join(tempDir, "banner.JPEG"), pngBytes);
+        writeFileSync(join(tempDir, "banner.gif"), pngBytes);
+        writeFileSync(join(tempDir, "empty.png"), Buffer.alloc(0));
+      });
+
+      beforeEach(() => {
+        vi.mocked(fsPromises.readFile).mockImplementation(realReadFile);
+      });
+
+      afterAll(() => {
+        rmSync(tempDir, { recursive: true, force: true });
+      });
+
+      it("should post an announcement with banner attachment and hosted contents", async () => {
+        mockClient.api().post.mockResolvedValue({ ...mockChatMessage, id: "announcement-id" });
+        registerTeamsTools(mockServer, mockGraphService, false);
+
+        const tool = mockServer.getTool("send_channel_message");
+        const result = await tool.handler({
+          teamId: "test-team-id",
+          channelId: "test-channel-id",
+          message: "Fixes & features\nSee <notes>",
+          subject: "Release 2026-10-13",
+          announcementImagePath: pngPath,
+          announcementTitle: "New release",
+        });
+
+        expect(result.isError).toBeUndefined();
+        expect(result.content[0].text).toContain("✅ Message sent successfully");
+        expect(result.content[0].text).toContain("📣 Posted as announcement");
+        expect(mockClient.api).toHaveBeenCalledWith(
+          "/teams/test-team-id/channels/test-channel-id/messages"
+        );
+
+        const payload = mockClient.api().post.mock.calls[0][0];
+        const attachmentId = payload.attachments[0].id;
+        expect(attachmentId).toMatch(/^[0-9a-f]{32}$/);
+        expect(payload.subject).toBe("Release 2026-10-13");
+        expect(payload.importance).toBe("normal");
+        // Plain text is escaped into HTML behind the banner's attachment tag
+        expect(payload.body).toEqual({
+          content: `<attachment id="${attachmentId}"></attachment>Fixes &amp; features<br>See &lt;notes&gt;`,
+          contentType: "html",
+        });
+        expect(payload.attachments).toEqual([
+          {
+            id: attachmentId,
+            contentType: "application/vnd.microsoft.teams.messaging-announcementBanner",
+            contentUrl: null,
+            content: expect.any(String),
+            name: null,
+            thumbnailUrl: null,
+          },
+        ]);
+        expect(JSON.parse(payload.attachments[0].content)).toEqual({
+          title: "New release",
+          cardImageType: "uploadedImage",
+          cardImageDetails: {
+            uploadedImageDetail: {
+              originalImage: {
+                source: "../hostedContents/2/$value",
+                imageContentType: "image/png",
+              },
+              croppedImage: { source: "../hostedContents/1/$value" },
+            },
+          },
+        });
+        expect(payload.hostedContents).toEqual([
+          {
+            "@microsoft.graph.temporaryId": "1",
+            contentBytes: pngBytes.toString("base64"),
+            contentType: "image/png",
+          },
+          {
+            "@microsoft.graph.temporaryId": "2",
+            contentBytes: pngBytes.toString("base64"),
+            contentType: "image/png",
+          },
+        ]);
+      });
+
+      it("should keep markdown and mentions working in an announcement", async () => {
+        const sentMessage = { ...mockChatMessage, id: "announcement-mention-id" };
+        mockClient.api = vi.fn().mockReturnValue({
+          post: vi.fn().mockResolvedValue(sentMessage),
+          get: vi.fn().mockResolvedValue({ displayName: "Test User" }),
+          select: vi.fn().mockReturnThis(),
+        });
+        registerTeamsTools(mockServer, mockGraphService, false);
+
+        const tool = mockServer.getTool("send_channel_message");
+        const result = await tool.handler({
+          teamId: "test-team-id",
+          channelId: "test-channel-id",
+          message: "**Released** by @testuser",
+          format: "markdown",
+          mentions: [{ mention: "testuser", userId: "user-id-123" }],
+          announcementImagePath: pngPath,
+        });
+
+        expect(result.content[0].text).toContain("✅ Message sent successfully");
+        expect(result.content[0].text).toContain("📱 Mentions: Test User");
+
+        const payload = mockClient.api().post.mock.calls[0][0];
+        const attachmentId = payload.attachments[0].id;
+        expect(payload.body.contentType).toBe("html");
+        expect(
+          payload.body.content.startsWith(`<attachment id="${attachmentId}"></attachment>`)
+        ).toBe(true);
+        expect(payload.body.content).toContain("<strong>Released</strong>");
+        expect(payload.body.content).toContain('<at id="0">Test User</at>');
+        expect(payload.mentions).toEqual([
+          { id: 0, mentionText: "Test User", mentioned: { user: { id: "user-id-123" } } },
+        ]);
+        expect(payload.subject).toBeUndefined();
+        expect(JSON.parse(payload.attachments[0].content).title).toBe("");
+      });
+
+      it("should derive a JPEG content type from the banner's extension", async () => {
+        mockClient.api().post.mockResolvedValue({ ...mockChatMessage, id: "jpeg-id" });
+        registerTeamsTools(mockServer, mockGraphService, false);
+
+        const tool = mockServer.getTool("send_channel_message");
+        await tool.handler({
+          teamId: "test-team-id",
+          channelId: "test-channel-id",
+          message: "Banner",
+          announcementImagePath: join(tempDir, "banner.JPEG"),
+        });
+
+        const payload = mockClient.api().post.mock.calls[0][0];
+        const card = JSON.parse(payload.attachments[0].content);
+        expect(card.cardImageDetails.uploadedImageDetail.originalImage.imageContentType).toBe(
+          "image/jpeg"
+        );
+        expect(payload.hostedContents.map((h: any) => h.contentType)).toEqual([
+          "image/jpeg",
+          "image/jpeg",
+        ]);
+      });
+
+      it.each([
+        ["a missing file", () => join(tempDir, "missing.png"), "Announcement image not found"],
+        [
+          "an unsupported type",
+          () => join(tempDir, "banner.gif"),
+          "Unsupported announcement image type",
+        ],
+        ["an empty file", () => join(tempDir, "empty.png"), "Announcement image is empty"],
+        ["a relative path", () => "banner.png", "Announcement image path must be absolute"],
+      ])("should return an error for %s without calling Graph", async (_case, imagePath, expected) => {
+        registerTeamsTools(mockServer, mockGraphService, false);
+
+        const tool = mockServer.getTool("send_channel_message");
+        const result = await tool.handler({
+          teamId: "test-team-id",
+          channelId: "test-channel-id",
+          message: "Banner",
+          announcementImagePath: imagePath(),
+        });
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain(expected);
+        expect(mockGraphService.getClient).not.toHaveBeenCalled();
+      });
+
+      it("should reject an announcement combined with an inline image", async () => {
+        registerTeamsTools(mockServer, mockGraphService, false);
+
+        const tool = mockServer.getTool("send_channel_message");
+        const result = await tool.handler({
+          teamId: "test-team-id",
+          channelId: "test-channel-id",
+          message: "Banner",
+          imageUrl: "https://example.com/image.png",
+          announcementImagePath: pngPath,
+        });
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain("cannot be combined with imageUrl/imageData");
+        expect(mockGraphService.getClient).not.toHaveBeenCalled();
+      });
+
+      it("should reject announcementTitle without announcementImagePath", async () => {
+        registerTeamsTools(mockServer, mockGraphService, false);
+
+        const tool = mockServer.getTool("send_channel_message");
+        const result = await tool.handler({
+          teamId: "test-team-id",
+          channelId: "test-channel-id",
+          message: "Banner",
+          announcementTitle: "New release",
+        });
+
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain(
+          "announcementTitle requires announcementImagePath"
+        );
+        expect(mockGraphService.getClient).not.toHaveBeenCalled();
+      });
     });
 
     it("should send reply with markdown format", async () => {

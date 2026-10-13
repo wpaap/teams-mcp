@@ -378,7 +378,7 @@ npx @floriscornel/teams-mcp@latest authenticate
 - `list_channels` - List channels in a specific team
 - `get_channel_messages` - Retrieve messages from a team channel with attachment summaries and content format selection
 - `get_channel_message_replies` - Get replies to a specific channel message
-- `send_channel_message` - Send a message to a team channel with optional mentions, importance, and image attachments
+- `send_channel_message` - Send a message to a team channel with optional subject, mentions, importance, and image attachments; or post it as an announcement with a banner image
 - `reply_to_channel_message` - Reply to an existing channel message
 - `update_channel_message` - Edit a previously sent channel message or reply
 - `delete_channel_message` - Soft delete a channel message or reply
@@ -460,6 +460,31 @@ npx @floriscornel/teams-mcp@latest logout
   "imageUrl": "https://example.com/status.png"
 }
 ```
+
+### Channel Announcement
+
+Set `announcementImagePath` to post the message as a Teams announcement, the way Graph's
+"send a message that contains an announcement" example does it:
+
+```json
+{
+  "teamId": "team-id",
+  "channelId": "channel-id",
+  "subject": "Release 2026-10-13",
+  "announcementImagePath": "/absolute/path/to/banner.png",
+  "announcementTitle": "",
+  "message": "What's new in **this release**",
+  "format": "markdown"
+}
+```
+
+- `announcementImagePath` — absolute local path to a `.png`, `.jpg` or `.jpeg` file. The image is sent
+  inline as both the cropped and the original banner (two `hostedContents` entries) without any
+  cropping, so size it for a banner (an announcement posted from Teams had a 1317×366 original).
+- `announcementTitle` — text drawn on the banner; defaults to none. Only valid with `announcementImagePath`.
+- `subject` — the subheading under the banner. It also works on a normal message, where it is the post's headline.
+- The body is always sent as HTML: `markdown` is converted as usual, plain `text` is HTML-escaped (newlines become `<br>`). Mentions keep working.
+- An announcement cannot also carry an inline image (`imageUrl` / `imageData`); the tool returns an error.
 
 ### File Upload Example
 

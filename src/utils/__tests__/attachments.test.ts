@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GraphService } from "../../services/graph.js";
 import { server } from "../../test-utils/setup.js";
 import {
+  ANNOUNCEMENT_BANNER_CONTENT_TYPE,
+  buildAnnouncementBanner,
   extractAttachmentSummaries,
+  getAnnouncementImageContentType,
   getFileExtensionFromMimeType,
   imageUrlToBase64,
   isValidImageType,
@@ -189,6 +192,43 @@ describe("Attachment Utilities", () => {
     it("should handle case insensitive mime types", () => {
       expect(getFileExtensionFromMimeType("IMAGE/JPEG")).toBe("jpg");
       expect(getFileExtensionFromMimeType("Image/PNG")).toBe("png");
+    });
+  });
+
+  describe("getAnnouncementImageContentType", () => {
+    it("should accept PNG and JPEG extensions regardless of case", () => {
+      expect(getAnnouncementImageContentType("C:\\banners\\release.png")).toBe("image/png");
+      expect(getAnnouncementImageContentType("/tmp/release.JPG")).toBe("image/jpeg");
+      expect(getAnnouncementImageContentType("/tmp/release.jpeg")).toBe("image/jpeg");
+    });
+
+    it("should return null for other or missing extensions", () => {
+      expect(getAnnouncementImageContentType("/tmp/release.gif")).toBeNull();
+      expect(getAnnouncementImageContentType("/tmp/release.svg")).toBeNull();
+      expect(getAnnouncementImageContentType("/tmp/release")).toBeNull();
+    });
+  });
+
+  describe("buildAnnouncementBanner", () => {
+    it("should reference the attachment from the body tag and default to an empty title", () => {
+      const banner = buildAnnouncementBanner("QUJD", "image/png");
+
+      expect(banner.bodyTag).toBe(`<attachment id="${banner.attachment.id}"></attachment>`);
+      expect(banner.attachment.contentType).toBe(ANNOUNCEMENT_BANNER_CONTENT_TYPE);
+      expect(JSON.parse(banner.attachment.content).title).toBe("");
+      expect(banner.hostedContents.map((h) => h["@microsoft.graph.temporaryId"])).toEqual([
+        "1",
+        "2",
+      ]);
+    });
+
+    it("should generate a fresh 32-hex attachment id per banner", () => {
+      const first = buildAnnouncementBanner("QUJD", "image/png");
+      const second = buildAnnouncementBanner("QUJD", "image/png");
+
+      expect(first.attachment.id).toMatch(/^[0-9a-f]{32}$/);
+      expect(second.attachment.id).toMatch(/^[0-9a-f]{32}$/);
+      expect(first.attachment.id).not.toBe(second.attachment.id);
     });
   });
 
