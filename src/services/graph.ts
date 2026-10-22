@@ -23,6 +23,21 @@ export const FULL_SCOPES = [
   "Files.ReadWrite.All",
 ];
 
+/**
+ * Resolve the scopes to request: TEAMS_MCP_SCOPES (comma/space separated)
+ * takes precedence, otherwise the read-only or full default set.
+ */
+export function resolveScopes(readOnly: boolean): string[] {
+  const envScopes = process.env.TEAMS_MCP_SCOPES;
+  if (envScopes) {
+    return envScopes
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return readOnly ? READ_ONLY_SCOPES : FULL_SCOPES;
+}
+
 export interface AuthStatus {
   isAuthenticated: boolean;
   userPrincipalName?: string | undefined;
@@ -57,7 +72,7 @@ export class GraphService {
 
   /** Returns the scopes to request based on the current mode. */
   get scopes(): string[] {
-    return this._readOnlyMode ? READ_ONLY_SCOPES : FULL_SCOPES;
+    return resolveScopes(this._readOnlyMode);
   }
 
   private async initializeClient(): Promise<void> {

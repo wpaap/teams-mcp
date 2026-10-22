@@ -312,6 +312,7 @@ TEAMS_MCP_READ_ONLY=true node dist/index.js
 ```bash
 npx @floriscornel/teams-mcp@latest authenticate              # Authenticate with full scopes
 npx @floriscornel/teams-mcp@latest authenticate --read-only  # Authenticate with read-only scopes
+npx @floriscornel/teams-mcp@latest authenticate --interactive # Authenticate via browser (auth code + PKCE)
 npx @floriscornel/teams-mcp@latest check                     # Check authentication status
 npx @floriscornel/teams-mcp@latest logout                    # Clear authentication
 npx @floriscornel/teams-mcp@latest auth                      # Alias for authenticate
@@ -323,6 +324,37 @@ npx @floriscornel/teams-mcp@latest                           # Start MCP server 
 - `TEAMS_MCP_READ_ONLY=true` - Start the MCP server in read-only mode
 - `AUTH_TOKEN=<jwt>` - Use a pre-existing Microsoft Graph access token instead of MSAL login
 - `TEAMS_MCP_CACHE_PATH=<path>` - Store the MSAL token cache at a custom path
+- `TEAMS_MCP_CLIENT_ID=<guid>` - Authenticate with your own Azure AD app registration instead of the default Microsoft Graph CLI app
+- `TEAMS_MCP_TENANT_ID=<guid-or-domain>` - Pin the authority to a specific tenant (e.g. `contoso.onmicrosoft.com`); required for single-tenant app registrations
+- `TEAMS_MCP_SCOPES="User.Read Chat.ReadWrite"` - Override the permission scopes requested during authentication (comma or space separated)
+
+### Using Your Own Azure AD App Registration
+
+By default the server authenticates through Microsoft's public Graph CLI app. To use your own app registration (for example, when your tenant requires it):
+
+1. In **App registrations**, set *Authentication* → *Allow public client flows* → **Yes**
+2. Add the required **Delegated** Microsoft Graph permissions (see the list above)
+3. Authenticate with your app pinned to your tenant:
+
+```bash
+TEAMS_MCP_CLIENT_ID=<your-app-id> \
+TEAMS_MCP_TENANT_ID=<your-tenant-id> \
+npx @floriscornel/teams-mcp@latest authenticate
+```
+
+Set the same environment variables on the MCP server process so it can renew tokens with the same app identity.
+
+If your tenant blocks the device code flow through Conditional Access (`AADSTS530032`), add `http://localhost` as a *Mobile and desktop applications* redirect URI on the app and authenticate with `--interactive` instead. This runs the auth-code + PKCE flow in your browser, so Conditional Access can evaluate the device. See [ENTRA_SETUP.md](./ENTRA_SETUP.md) for a step-by-step guide.
+
+### Admin Consent Troubleshooting
+
+Most Teams permissions (`Team.ReadBasic.All`, `ChannelMessage.*`, `Chat.ReadWrite`, `Files.ReadWrite.All`) require admin consent. If sign-in shows *"Need admin approval"*, an admin must grant consent for the app once — via *Enterprise applications → Permissions → Grant admin consent*, or by opening:
+
+```
+https://login.microsoftonline.com/<tenant-id>/v2.0/adminconsent?client_id=<app-id>&scope=<space-separated scopes>&redirect_uri=<registered-redirect-uri>
+```
+
+After admin consent is granted, `authenticate` completes without prompts. Requesting scopes that are **not configured on the app registration** will always trigger the admin-approval wall — verify the app's *API permissions* list covers every requested scope.
 
 ### Read-Only Mode
 
@@ -360,8 +392,8 @@ npx @floriscornel/teams-mcp@latest authenticate
 **Read-only tools (16):**
 `auth_status`, `get_current_user`, `search_users`, `get_user`, `list_teams`, `list_channels`, `get_channel_messages`, `get_channel_message_replies`, `list_team_members`, `search_users_for_mentions`, `download_message_hosted_content`, `list_chats`, `get_chat_messages`, `download_chat_hosted_content`, `search_messages`, `get_my_mentions`
 
-**Write tools disabled in read-only mode (10):**
-`send_channel_message`, `reply_to_channel_message`, `update_channel_message`, `delete_channel_message`, `send_file_to_channel`, `send_chat_message`, `create_chat`, `update_chat_message`, `delete_chat_message`, `send_file_to_chat`
+**Write tools disabled in read-only mode (15):**
+`send_channel_message`, `reply_to_channel_message`, `update_channel_message`, `delete_channel_message`, `send_file_to_channel`, `send_chat_message`, `create_chat`, `add_chat_member`, `update_chat_message`, `delete_chat_message`, `send_file_to_chat`, `set_channel_message_reaction`, `set_chat_message_reaction`, `unset_channel_message_reaction`, `unset_chat_message_reaction`
 
 ### Available MCP Tools
 
@@ -382,6 +414,8 @@ npx @floriscornel/teams-mcp@latest authenticate
 - `reply_to_channel_message` - Reply to an existing channel message
 - `update_channel_message` - Edit a previously sent channel message or reply
 - `delete_channel_message` - Soft delete a channel message or reply
+- `set_channel_message_reaction` - Add a reaction to a channel message
+- `unset_channel_message_reaction` - Remove a reaction from a channel message
 - `list_team_members` - List members of a specific team
 - `search_users_for_mentions` - Search for team members to @mention in messages
 - `send_file_to_channel` - Upload a local file and send it as a message to a channel
@@ -391,8 +425,11 @@ npx @floriscornel/teams-mcp@latest authenticate
 - `get_chat_messages` - Retrieve messages from a specific chat with pagination, filters, ordering, and `fetchAll`
 - `send_chat_message` - Send a message to a chat
 - `create_chat` - Create a new 1:1 or group chat
+- `add_chat_member` - Add one or more members to an existing group chat
 - `update_chat_message` - Edit a previously sent chat message
 - `delete_chat_message` - Soft delete a chat message
+- `set_chat_message_reaction` - Add a reaction to a chat message
+- `unset_chat_message_reaction` - Remove a reaction from a chat message
 - `send_file_to_chat` - Upload a local file and send it as a message to a chat
 
 #### Media Operations

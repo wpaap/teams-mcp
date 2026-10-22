@@ -1,12 +1,12 @@
 # Entra ID setup for teams-mcp (interactive auth-code flow)
 
-This fork adds an `authenticate --interactive` flow that uses **OAuth auth-code + PKCE
-with a loopback redirect**, sidestepping the upstream device-code flow that gets blocked
-by tenants which enable the Microsoft-managed Conditional Access policy
-*"Block device code flow"* (often enforced by tenant Conditional Access policy).
+`authenticate --interactive` uses **OAuth auth-code + PKCE with a loopback redirect**
+instead of the default device code flow. Use it when your tenant blocks device code
+sign-in through Conditional Access (for example the *"Block device code flow"* policy),
+which fails with `AADSTS530032`.
 
 The interactive flow requires an Entra app registration **in your tenant**, because the
-upstream default (Microsoft Graph CLI app, `14d82eec-204b-4c2f-b7e8-296a70dab67e`) does
+default Microsoft Graph CLI app (`14d82eec-204b-4c2f-b7e8-296a70dab67e`) does
 not have `http://localhost` registered as a public-client redirect URI in your tenant.
 
 ## Which path applies to you?
@@ -76,20 +76,19 @@ For a read-only deployment (start MCP with `--read-only`), the minimum set is
 **Overview** blade → copy:
 
 - **Application (client) ID** → set as `TEAMS_MCP_CLIENT_ID`
-- **Directory (tenant) ID** → use in `TEAMS_MCP_AUTHORITY` =
-  `https://login.microsoftonline.com/<tenant-id>`
+- **Directory (tenant) ID** → set as `TEAMS_MCP_TENANT_ID`
 
-Single-tenant authority is **required** when the app registration is single-tenant;
-the upstream default `/common` will reject sign-in with `AADSTS50194`.
+A tenant ID is **required** when the app registration is single-tenant;
+the default `common` authority will reject sign-in with `AADSTS50194`.
 
 ## 4. Authenticate
 
 You need the **client ID** and **tenant ID** from section 3 (or from your admin if you
-are on Path B). From the cloned/built fork:
+are on Path B). From a cloned and built checkout:
 
 ```bash
 TEAMS_MCP_CLIENT_ID=<your-client-id> \
-TEAMS_MCP_AUTHORITY=https://login.microsoftonline.com/<your-tenant-id> \
+TEAMS_MCP_TENANT_ID=<your-tenant-id> \
   node dist/index.js authenticate --interactive
 ```
 
@@ -116,7 +115,7 @@ Edit `~/.claude.json` (or your MCP client's config):
       "args": ["/absolute/path/to/teams-mcp/dist/index.js"],
       "env": {
         "TEAMS_MCP_CLIENT_ID": "<your-client-id>",
-        "TEAMS_MCP_AUTHORITY": "https://login.microsoftonline.com/<your-tenant-id>"
+        "TEAMS_MCP_TENANT_ID": "<your-tenant-id>"
       }
     }
   }
@@ -130,13 +129,10 @@ Edit `~/.claude.json` (or your MCP client's config):
 - **`AADSTS65001 / consent required`** — admin hasn't consented to the
   permissions, or you added a new permission after the last consent. Re-run
   *Grant admin consent* in the Entra portal.
-- **`AADSTS50194 / not configured as multi-tenant`** — you set
-  `TEAMS_MCP_AUTHORITY` to `/common` but the app is single-tenant. Use the
-  tenant-specific authority `https://login.microsoftonline.com/<tenant-id>`.
+- **`AADSTS50194 / not configured as multi-tenant`** — `TEAMS_MCP_TENANT_ID`
+  is unset (so the `common` authority is used) but the app is single-tenant.
+  Set `TEAMS_MCP_TENANT_ID` to your directory (tenant) ID.
 - **`AADSTS530032 / blocked by Conditional Access`** — the interactive flow
   is still being blocked. Check the CA report-only / blocking policies on the
   user; consider adding the user to an exclusion group or enrolling the device
   in Intune.
-- **Browser shows mojibake on the success page** — clear the token cache
-  (`teams-mcp logout`) and rebuild; the success template was fixed to declare
-  UTF-8 charset.
