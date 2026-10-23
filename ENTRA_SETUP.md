@@ -1,138 +1,121 @@
-# Entra ID setup for teams-mcp (interactive auth-code flow)
+# Entra ID setup for interactive sign-in
 
-`authenticate --interactive` uses **OAuth auth-code + PKCE with a loopback redirect**
-instead of the default device code flow. Use it when your tenant blocks device code
-sign-in through Conditional Access (for example the *"Block device code flow"* policy),
-which fails with `AADSTS530032`.
+`authenticate --interactive` signs in with the **OAuth 2.0 authorization code flow with
+PKCE and a loopback redirect**, instead of the default device code flow. Use it when
+your organization blocks device code sign-in through Conditional Access (for example
+with a *"Block device code flow"* policy). Device code sign-in then fails with
+`AADSTS530032`.
 
-The interactive flow requires an Entra app registration **in your tenant**, because the
-default Microsoft Graph CLI app (`14d82eec-204b-4c2f-b7e8-296a70dab67e`) does
-not have `http://localhost` registered as a public-client redirect URI in your tenant.
+Because the sign-in happens in your browser, Conditional Access evaluates it like any
+other browser sign-in (MFA, device compliance, sign-in risk).
 
-## Which path applies to you?
+The interactive flow needs an app registration in your own tenant: the default
+Microsoft Graph CLI app does not let you register `http://localhost` as a redirect URI.
 
-The app registration is **per tenant, not per user** — one registration serves the whole
-organisation. Tokens are user-delegated and stored per user (`~/.teams-mcp-token-cache.json`),
-so every signed-in user only sees their own Teams data.
-
-- **Path A — first person in the tenant / admin:** no existing registration yet. Follow
-  sections 1 → 5 below to create it, grant admin consent, and authenticate.
-- **Path B — your org already has a teams-mcp app registration:** ask whoever set it up
-  (or your Entra admin) for the **client ID** and **tenant ID**. Skip sections 1 – 3 and
-  jump straight to [section 4 (Authenticate)](#4-authenticate).
-
-The client ID is **not a secret** — it's safe to share internally (Teams/Slack/wiki),
-but don't publish it to public GitHub.
+> **Already have an app registration?** An app registration serves the whole tenant,
+> while tokens are stored per user. If someone in your organization already created
+> one for teams-mcp, ask them for the client ID and tenant ID and skip to
+> [step 4](#4-sign-in).
 
 ## 1. Register the app
 
-Microsoft Entra admin center → **Identity → Applications → App registrations → New registration**
+In the Microsoft Entra admin center, go to **App registrations → New registration**:
 
-| Field                 | Value                                                          |
-|-----------------------|----------------------------------------------------------------|
-| Name                  | `teams-mcp` (or org-specific, e.g. `yourcompany-teams-mcp`)    |
-| Supported accounts    | **Single tenant only** (`Accounts in this organizational directory only`) |
-| Redirect URI platform | **Public client/native (mobile & desktop)**                    |
-| Redirect URI value    | `http://localhost` *(no port — Entra allows any loopback port at runtime per RFC 8252)* |
+| Field                   | Value                                                            |
+|-------------------------|------------------------------------------------------------------|
+| Name                    | Any name, e.g. `teams-mcp`                                       |
+| Supported account types | *Accounts in this organizational directory only* (single tenant) |
+| Redirect URI platform   | **Public client/native (mobile & desktop)**                      |
+| Redirect URI            | `http://localhost`                                               |
 
-> If the new registration UI defaulted to **Web** platform, fix it after creation:
-> *Authentication* blade → delete the Web redirect URI → **Add a platform** → *Mobile and
-> desktop applications* → `http://localhost`.
+Leave the port off the redirect URI. Entra accepts any port on a loopback redirect, and
+MSAL picks a free one at sign-in time.
 
-After creation, on the **Authentication** blade → **Settings** tab → confirm
-**"Allow public client flows"** is **Enabled**. MSAL will refuse the flow otherwise.
+If the redirect URI ended up under the **Web** platform, remove it and add it again on
+the **Authentication** page with **Add a platform → Mobile and desktop applications**.
 
-## 2. Configure API permissions
+On the same **Authentication** page, set **Allow public client flows** to **Yes**.
 
-**API permissions** blade → **Add a permission** → **Microsoft Graph** → **Delegated permissions**.
+## 2. Add API permissions
 
-Required for full functionality:
+Under **API permissions → Add a permission → Microsoft Graph → Delegated permissions**,
+add the permissions teams-mcp requests:
 
-| Permission                              | Why                                                |
-|-----------------------------------------|----------------------------------------------------|
-| `User.Read`                             | Read signed-in user profile (auth status check)    |
-| `User.ReadBasic.All`                    | Resolve users referenced in chats / messages       |
-| `Team.ReadBasic.All`                    | List teams, resolve team ids                       |
-| `Channel.ReadBasic.All`                 | List channels                                      |
-| `ChannelMessage.Read.All`               | Read channel messages (admin-consent required)     |
-| `ChannelMessage.Send`                   | Post replies                                       |
-| `ChannelMessage.ReadWrite`              | Edit / react / unreact on channel messages         |
-| `Chat.ReadWrite`                        | Read + send 1:1 / group chat messages              |
-| `TeamMember.Read.All`                   | Resolve team member identities                     |
-| `Files.ReadWrite.All`                   | Upload attachments to channels / chats             |
-| `TeamsAppInstallation.ReadWriteSelfForChat` *(optional)* | Allow the app to install itself in a chat (some attachment flows) |
+| Permission                 | Used for                                           |
+|----------------------------|----------------------------------------------------|
+| `User.Read`                | Signed-in user profile                             |
+| `User.ReadBasic.All`       | Looking up users                                   |
+| `Team.ReadBasic.All`       | Listing teams                                      |
+| `Channel.ReadBasic.All`    | Listing channels                                   |
+| `ChannelMessage.Read.All`  | Reading channel messages                           |
+| `TeamMember.Read.All`      | Listing team members                               |
+| `Chat.Read`                | Reading chats                                      |
+| `ChannelMessage.Send`      | Sending channel messages and replies               |
+| `ChannelMessage.ReadWrite` | Editing, deleting and reacting to channel messages |
+| `Chat.ReadWrite`           | Creating chats and sending chat messages           |
+| `Files.ReadWrite.All`      | Uploading files to channels and chats              |
 
-A few of these (`ChannelMessage.Read.All`, `TeamsAppInstallation.*`) are flagged
-**"Admin consent required"**. After adding, click **Grant admin consent for
-\<your tenant\>** at the top of the permissions list. All rows should show
-**Status: Granted for \<your tenant\>** (green check).
+In read-only mode (`--read-only` or `TEAMS_MCP_READ_ONLY=true`) only the first seven are
+requested. If your app has a different set, request exactly that set with
+`TEAMS_MCP_SCOPES`.
 
-For a read-only deployment (start MCP with `--read-only`), the minimum set is
-`User.Read`, `User.ReadBasic.All`, `Team.ReadBasic.All`, `Channel.ReadBasic.All`,
-`ChannelMessage.Read.All`, `TeamMember.Read.All`, `Chat.Read`.
+Several of these permissions require admin consent. An admin can grant it with
+**Grant admin consent for \<tenant\>** on the same page. Every permission should then
+show as granted.
 
-## 3. Note the IDs
+## 3. Copy the IDs
 
-**Overview** blade → copy:
+On the app's **Overview** page, copy:
 
-- **Application (client) ID** → set as `TEAMS_MCP_CLIENT_ID`
-- **Directory (tenant) ID** → set as `TEAMS_MCP_TENANT_ID`
+- **Application (client) ID**: use it as `TEAMS_MCP_CLIENT_ID`
+- **Directory (tenant) ID**: use it as `TEAMS_MCP_TENANT_ID`
 
-A tenant ID is **required** when the app registration is single-tenant;
-the default `common` authority will reject sign-in with `AADSTS50194`.
+For a single-tenant app the tenant ID is required. Without it the `common` authority is
+used, and sign-in fails with `AADSTS50194`.
 
-## 4. Authenticate
-
-You need the **client ID** and **tenant ID** from section 3 (or from your admin if you
-are on Path B). From a cloned and built checkout:
+## 4. Sign in
 
 ```bash
-TEAMS_MCP_CLIENT_ID=<your-client-id> \
-TEAMS_MCP_TENANT_ID=<your-tenant-id> \
-  node dist/index.js authenticate --interactive
+TEAMS_MCP_CLIENT_ID=<client-id> \
+TEAMS_MCP_TENANT_ID=<tenant-id> \
+npx @floriscornel/teams-mcp@latest authenticate --interactive
 ```
 
-A browser tab opens against `login.microsoftonline.com`, you sign in (passing
-Conditional Access naturally because the flow is interactive + carries device
-identity), and the redirect lands on `http://localhost:<ephemeral-port>` where
-MSAL's loopback listener exchanges the code for a token.
+Your browser opens the Microsoft sign-in page. After you sign in, the browser is
+redirected to a temporary listener on `http://localhost`, and the CLI stores the tokens
+in `~/.teams-mcp-token-cache.json`. The MCP server reuses and refreshes these tokens on
+every start, so you only sign in again when the refresh token expires or is revoked.
 
-The refresh token is cached at `~/.teams-mcp-token-cache.json`. The MCP server
-re-uses this cache silently on every start, refreshing access tokens as they
-expire — no further sign-in required until the refresh token's lifetime ends
-(typically 90 days).
+## 5. Configure your MCP client
 
-## 5. Wire into Claude Code / MCP client
-
-Edit `~/.claude.json` (or your MCP client's config):
+Pass the same environment variables to the MCP server, so it refreshes tokens with the
+same app. For example:
 
 ```json
 {
   "mcpServers": {
     "teams-mcp": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["/absolute/path/to/teams-mcp/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@floriscornel/teams-mcp@latest"],
       "env": {
-        "TEAMS_MCP_CLIENT_ID": "<your-client-id>",
-        "TEAMS_MCP_TENANT_ID": "<your-tenant-id>"
+        "TEAMS_MCP_CLIENT_ID": "<client-id>",
+        "TEAMS_MCP_TENANT_ID": "<tenant-id>"
       }
     }
   }
 }
 ```
 
-`AUTH_TOKEN=<jwt>` is still supported and takes priority over the cache.
-
 ## Troubleshooting
 
-- **`AADSTS65001 / consent required`** — admin hasn't consented to the
-  permissions, or you added a new permission after the last consent. Re-run
-  *Grant admin consent* in the Entra portal.
-- **`AADSTS50194 / not configured as multi-tenant`** — `TEAMS_MCP_TENANT_ID`
-  is unset (so the `common` authority is used) but the app is single-tenant.
-  Set `TEAMS_MCP_TENANT_ID` to your directory (tenant) ID.
-- **`AADSTS530032 / blocked by Conditional Access`** — the interactive flow
-  is still being blocked. Check the CA report-only / blocking policies on the
-  user; consider adding the user to an exclusion group or enrolling the device
-  in Intune.
+- **`AADSTS65001` (consent required):** admin consent has not been granted, or a
+  permission was added after consent was given. Grant admin consent again.
+- **`AADSTS50194` (not configured as multi-tenant):** `TEAMS_MCP_TENANT_ID` is not set
+  while the app is single-tenant. Set it to the directory (tenant) ID.
+- **`AADSTS50011` (redirect URI mismatch):** `http://localhost` is missing or registered
+  under the wrong platform. See [step 1](#1-register-the-app).
+- **`AADSTS7000218` (client assertion or secret required):** **Allow public client
+  flows** is off. See [step 1](#1-register-the-app).
+- **`AADSTS530032` with `--interactive`:** Conditional Access also blocks the browser
+  sign-in, for example because the device is not compliant. Check the sign-in logs in
+  Entra or ask your administrator which policy applies.
